@@ -4,8 +4,9 @@
 # Run examples
 
 # Select images
-python select_diverse_images.py \
-    --input "../../../../Downloads/masked_clean" \
+python code/select_diverse_images.py \
+    --input "data/all" \
     --output "data/select1" \
     --n 20 \
     --method fps
+

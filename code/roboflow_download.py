@@ -2,35 +2,18 @@
 """
 Download a Roboflow dataset version for retraining.
 
-# API1 - 2Z8LedwxqBlKAbVYyz8T
-# ring_detection-497ko
-# tag_detection-g6gi0
-# fish_seabirds_combined-625bd
-
-# API2 - X2yHJUrUKxkMNDPlzaAd
-# Workspace: Research
-# auklab_seabirdfish-9b8c2
-
 
 Usage example:
   export ROBOFLOW_API_KEY="X2yHJUrUKxkMNDPlzaAd"
-  python3 code/dataset/roboflow_download.py \
-	  --workspace ai-course-2024 \
-	  --project fish_seabirds_combined-625bd \
-	  --version 12 \
+  python3 code/roboflow_download.py \
+	  --workspace research-x1kcu \
+	  --project echograms-2 \
+	  --version 3 \
 	  --format yolov11
 """
 
-"""
-Usage example:
-  export ROBOFLOW_API_KEY="2Z8LedwxqBlKAbVYyz8T"
-python3 code/dataset/roboflow_download.py \
-	--workspace research-x1kcu \
-	--project auklab_seabirdfish \
-	--version 2 \
-	--format yolov11
-"""
 
+	
 
 #from __future__ import annotations
 
