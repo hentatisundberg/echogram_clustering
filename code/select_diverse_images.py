@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 
+
+"""
+RUN EXAMPLE: 
+python3 code/select_diverse_images.py --input data/all --output data/batch2 --n 100 --method fps
+"""
+
 import argparse
 import shutil
 from pathlib import Path

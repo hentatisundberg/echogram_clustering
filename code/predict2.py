@@ -1,6 +1,7 @@
 
 from ultralytics import YOLO
 from pathlib import Path
+import argparse
 import cv2
 import numpy as np
 import torch
@@ -9,7 +10,7 @@ import torch
 # CONFIGURATION
 # --------------------------------------------------
 
-MODEL_PATH = "runs/segment/train-2/weights/best.pt"
+MODEL_PATH = "runs/semantic/train/weights/best.pt"
 IMAGE_FOLDER = "data/select1/"
 
 CONF_THRESHOLD = 0.25
@@ -21,16 +22,34 @@ MASK_ALPHA = 0.30       # Mask transparency
 DRAW_CONTOURS = True
 CONTOUR_THICKNESS = 1
 SHOW_LABELS = True
-SHOW_CONFIDENCE = False
-FONT_SCALE = 0.1
+SHOW_CONFIDENCE = True
+FONT_SCALE = 0.3
 FONT_THICKNESS = 1
 
-SCREEN_WIDTH = 1400
+SCREEN_WIDTH = 1000
 SCREEN_HEIGHT = 900
+
+OUTPUT_FOLDER = "data/predictions2/"
 
 # --------------------------------------------------
 # INITIALIZE
 # --------------------------------------------------
+
+parser = argparse.ArgumentParser(
+    description="Run segmentation predictions and optionally display them."
+)
+parser.add_argument(
+    "--show",
+    action="store_true",
+    help="Open an interactive OpenCV window (disabled by default for SSH/headless use)",
+)
+parser.add_argument(
+    "--output-dir",
+    type=Path,
+    default=Path(OUTPUT_FOLDER),
+    help=f"Directory for annotated PNG images (default: {OUTPUT_FOLDER})",
+)
+args = parser.parse_args()
 
 model = YOLO(MODEL_PATH)
 
@@ -155,9 +174,10 @@ def draw_masks(image, result):
 # INTERACTIVE VIEWER
 # --------------------------------------------------
 
+args.output_dir.mkdir(parents=True, exist_ok=True)
 index = 0
 
-while True:
+while index < len(image_paths):
 
     image_path = image_paths[index]
 
@@ -168,7 +188,7 @@ while True:
 
     if image is None:
         print(f"Could not read: {image_path}")
-        index = (index + 1) % len(image_paths)
+        index += 1
         continue
 
     # Run prediction
@@ -187,22 +207,6 @@ while True:
     # Draw masks only
     annotated = draw_masks(image, result)
 
-    # Resize for screen display
-    h, w = annotated.shape[:2]
-
-    scale = min(
-        SCREEN_WIDTH / w,
-        SCREEN_HEIGHT / h,
-        1.0
-    )
-
-    if scale < 1:
-        annotated = cv2.resize(
-            annotated,
-            (int(w * scale), int(h * scale)),
-            interpolation=cv2.INTER_AREA
-        )
-
     # Small image information
     cv2.putText(
         annotated,
@@ -215,19 +219,41 @@ while True:
         cv2.LINE_AA
     )
 
-    cv2.imshow("YOLO Segmentation Viewer", annotated)
+    output_path = args.output_dir / f"{image_path.stem}_segmented.png"
+    if not cv2.imwrite(str(output_path), annotated):
+        raise RuntimeError(f"Could not save result: {output_path}")
+    print(f"Saved: {output_path}")
 
-    key = cv2.waitKey(0) & 0xFF
+    if args.show:
+        display = annotated
+        h, w = display.shape[:2]
 
-    if key in [ord('q'), 27]:
-        break
+        scale = min(
+            SCREEN_WIDTH / w,
+            SCREEN_HEIGHT / h,
+            1.0
+        )
 
-    elif key in [ord('n'), 83, 3]:
-        index = (index + 1) % len(image_paths)
+        if scale < 1:
+            display = cv2.resize(
+                display,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_AREA
+            )
 
-    elif key in [ord('p'), 81, 2]:
-        index = (index - 1) % len(image_paths)
+        cv2.imshow("YOLO Segmentation Viewer", display)
+        key = cv2.waitKey(0) & 0xFF
 
-cv2.destroyAllWindows()
+        if key in [ord('q'), 27]:
+            break
+
+        elif key in [ord('p'), 81, 2]:
+            index = max(index - 1, 0)
+            continue
+
+    index += 1
+
+if args.show:
+    cv2.destroyAllWindows()
 
 
