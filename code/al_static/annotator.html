@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Echogram mask annotator</title>
+<style>
+  :root { --bg:#1e1f22; --panel:#2b2d31; --fg:#e6e6e6; --muted:#9aa0a6; --acc:#4f8cff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg); font:13px/1.35 system-ui, sans-serif; }
+  #app { display:grid; grid-template-columns: 300px 1fr; grid-template-rows: auto 1fr auto; height:100vh; }
+  #toolbar { grid-column: 1 / 3; display:flex; flex-wrap:wrap; gap:10px; align-items:center; padding:6px 10px; background:var(--panel); border-bottom:1px solid #000; }
+  #sidebar { overflow:auto; background:var(--panel); border-right:1px solid #000; }
+  #stage { position:relative; overflow:hidden; cursor:crosshair; }
+  #stage canvas { position:absolute; inset:0; }
+  #statusbar { grid-column: 1 / 3; padding:4px 10px; background:var(--panel); color:var(--muted); border-top:1px solid #000; display:flex; gap:18px; }
+  .group { display:flex; gap:4px; align-items:center; padding-right:10px; border-right:1px solid #444; }
+  .group:last-child { border-right:none; }
+  button, select { background:#3a3d43; color:var(--fg); border:1px solid #555; border-radius:4px; padding:3px 8px; cursor:pointer; font:inherit; }
+  button:hover { background:#474a51; }
+  button.active { background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.cls { display:flex; gap:5px; align-items:center; }
+  .swatch { width:12px; height:12px; border-radius:2px; border:1px solid #000; display:inline-block; }
+  #filters { display:flex; gap:4px; padding:6px; position:sticky; top:0; background:var(--panel); border-bottom:1px solid #444; }
+  .item { padding:5px 8px; border-bottom:1px solid #383a40; cursor:pointer; }
+  .item:hover { background:#34373c; }
+  .item.current { background:#3b4a6b; }
+  .item .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:12px; }
+  .item .info { color:var(--muted); font-size:11px; }
+  .badge { display:inline-block; padding:0 5px; border-radius:3px; font-size:10px; margin-right:4px; }
+  .b-todo { background:#6b5b20; } .b-done { background:#285e33; } .b-skipped { background:#5a2d2d; } .b-dataset { background:#3d3d6b; }
+  #dirty { color:#ffb347; font-weight:600; }
+  #help { position:absolute; right:10px; top:10px; background:rgba(20,20,22,.92); padding:10px 14px; border-radius:6px; display:none; max-width:420px; z-index:5; }
+  #help table td { padding:1px 8px 1px 0; vertical-align:top; } #help kbd { background:#444; padding:0 4px; border-radius:3px; }
+  #toast { position:absolute; left:50%; bottom:18px; transform:translateX(-50%); background:#333; padding:6px 14px; border-radius:6px; opacity:0; transition:opacity .3s; z-index:6; pointer-events:none; }
+  input[type=range] { width:90px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <div class="group" id="tools">
+      <button data-tool="brush" title="Brush (B)">Brush</button>
+      <button data-tool="lasso" title="Freehand lasso fill (L)">Lasso</button>
+      <button data-tool="below" title="Fill BELOW a polyline: click points, Enter to apply (D)">Fill below</button>
+      <button data-tool="above" title="Fill ABOVE a polyline: click points, Enter to apply (U)">Fill above</button>
+      <button data-tool="fill" title="Bucket fill connected region (G)">Bucket</button>
+    </div>
+    <div class="group" id="classes"></div>
+    <div class="group">
+      Size <input type="range" id="brush" min="1" max="150" value="15"><span id="brushVal">15</span>
+    </div>
+    <div class="group">
+      Only paint over
+      <select id="target"><option value="-1">anything</option></select>
+    </div>
+    <div class="group">
+      Opacity <input type="range" id="alpha" min="0" max="100" value="45">
+      <button id="toggleMask" class="active" title="Toggle mask (M)">Mask</button>
+      <button id="toggleConf" title="Toggle low-confidence heatmap (C)">Low conf</button>
+    </div>
+    <div class="group">
+      <button id="undo" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="redo" title="Redo (Ctrl+Shift+Z)">Redo</button>
+      <button id="resetPred" title="Reload model prediction (R)">Reset to pred</button>
+    </div>
+    <div class="group">
+      Split <select id="split"><option>train</option><option>val</option></select>
+      <button id="save" title="Save (S)">Save</button>
+      <button id="saveNext" title="Save and go to next (Shift+S)">Save &amp; next</button>
+      <button id="skip" title="Skip / exclude this image (X)">Skip</button>
+    </div>
+    <div class="group"><button id="helpBtn">? Help</button></div>
+  </div>
+
+  <div id="sidebar">
+    <div id="filters">
+      <button data-filter="todo" class="active">To do</button>
+      <button data-filter="done">Done</button>
+      <button data-filter="skipped">Skipped</button>
+      <button data-filter="all">All</button>
+    </div>
+    <div id="list"></div>
+  </div>
+
+  <div id="stage">
+    <canvas id="view"></canvas>
+    <div id="help">
+      <b>Mouse</b>
+      <table>
+        <tr><td>Left drag</td><td>paint / lasso (current tool)</td></tr>
+        <tr><td>Right / middle drag, or Space+drag</td><td>pan</td></tr>
+        <tr><td>Wheel</td><td>zoom at cursor</td></tr>
+      </table>
+      <b>Keys</b>
+      <table>
+        <tr><td><kbd>1</kbd>…<kbd>9</kbd></td><td>select class</td></tr>
+        <tr><td><kbd>0</kbd></td><td>ignore label (255) – excluded from training loss</td></tr>
+        <tr><td><kbd>B</kbd> <kbd>L</kbd> <kbd>D</kbd> <kbd>U</kbd> <kbd>G</kbd></td><td>brush, lasso, fill below, fill above, bucket</td></tr>
+        <tr><td><kbd>Enter</kbd> / <kbd>Esc</kbd> / <kbd>Backspace</kbd></td><td>apply / cancel / remove last polyline point</td></tr>
+        <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>brush size</td></tr>
+        <tr><td><kbd>M</kbd> <kbd>C</kbd> <kbd>F</kbd></td><td>toggle mask, toggle low-confidence, fit to view</td></tr>
+        <tr><td><kbd>Ctrl+Z</kbd> <kbd>Ctrl+Shift+Z</kbd></td><td>undo / redo</td></tr>
+        <tr><td><kbd>S</kbd> <kbd>Shift+S</kbd></td><td>save / save &amp; next</td></tr>
+        <tr><td><kbd>N</kbd> <kbd>P</kbd></td><td>next / previous image</td></tr>
+        <tr><td><kbd>X</kbd> <kbd>R</kbd></td><td>skip image / reset to model prediction</td></tr>
+      </table>
+      <p>"Fill below" is handy for seafloor: click along the seafloor line from left to right and press Enter. The line is extended to the image edges.</p>
+    </div>
+    <div id="toast"></div>
+  </div>
+
+  <div id="statusbar">
+    <span id="sImage">–</span><span id="sOrigin"></span><span id="sCursor"></span><span id="dirty"></span><span id="sProgress"></span>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const view = $("#view"), vctx = view.getContext("2d");
+const stage = $("#stage");
+
+const S = {
+  meta: null, items: [], filter: "todo", cur: null,
+  W: 0, H: 0, img: null, mask: null, origin: "",
+  overlay: document.createElement("canvas"), ovData: null,
+  confCanvas: null, conf: null,
+  scale: 1, ox: 0, oy: 0,
+  tool: "brush", cls: 0, brush: 15, target: -1, alpha: 0.45, showMask: true, showConf: false,
+  undo: [], redo: [], dirty: false,
+  drag: null, path: [], poly: [], mouse: null, space: false,
+  colors: {},
+};
+const IGN = 255;
+const MAX_UNDO = 25;
+
+// ---------------------------------------------------------------- setup
+async function init() {
+  S.meta = await (await fetch("/api/meta")).json();
+  const bg = S.meta.background_id;
+  for (const c of S.meta.classes) S.colors[c.id] = c.id === bg ? null : c.color;
+  S.colors[IGN] = [255, 0, 255];
+  const cdiv = $("#classes"), tsel = $("#target");
+  const all = [...S.meta.classes, { id: IGN, name: "ignore", color: [255, 0, 255] }];
+  all.forEach((c, i) => {
+    const b = document.createElement("button");
+    b.className = "cls"; b.dataset.cls = c.id;
+    const key = c.id === IGN ? "0" : String(i + 1);
+    const col = c.id === bg ? "transparent" : `rgb(${c.color})`;
+    b.innerHTML = `<span class="swatch" style="background:${col}"></span>${key}: ${c.name}`;
+    b.onclick = () => setClass(c.id);
+    cdiv.appendChild(b);
+    const o = document.createElement("option"); o.value = c.id; o.textContent = c.name; tsel.appendChild(o);
+  });
+  setClass(S.meta.classes[0].id);
+  setTool("brush");
+  document.querySelectorAll("#tools button").forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
+  document.querySelectorAll("#filters button").forEach((b) => (b.onclick = () => {
+    S.filter = b.dataset.filter;
+    document.querySelectorAll("#filters button").forEach((x) => x.classList.toggle("active", x === b));
+    renderList();
+  }));
+  $("#brush").oninput = (e) => setBrush(+e.target.value);
+  $("#target").onchange = (e) => (S.target = +e.target.value);
+  $("#alpha").oninput = (e) => { S.alpha = e.target.value / 100; draw(); };
+  $("#toggleMask").onclick = () => toggleMask();
+  $("#toggleConf").onclick = () => toggleConf();
+  $("#undo").onclick = undo; $("#redo").onclick = redo;
+  $("#resetPred").onclick = () => resetToPrediction();
+  $("#save").onclick = () => save(false);
+  $("#saveNext").onclick = () => save(true);
+  $("#skip").onclick = skip;
+  $("#helpBtn").onclick = () => { const h = $("#help"); h.style.display = h.style.display === "block" ? "none" : "block"; };
+  window.addEventListener("resize", resize);
+  setupMouse(); setupKeys(); resize();
+  await loadItems();
+  const first = visibleItems()[0];
+  if (first) await openItem(first.stem);
+}
+
+async function loadItems() {
+  S.items = await (await fetch("/api/items")).json();
+  S.items.sort((a, b) => (a.kind !== b.kind ? (a.kind === "queue" ? -1 : 1) : (b.score ?? -1) - (a.score ?? -1)));
+  renderList();
+}
+function visibleItems() {
+  if (S.filter === "all") return S.items;
+  return S.items.filter((it) => it.status === S.filter);
+}
+function renderList() {
+  const list = $("#list"); list.innerHTML = "";
+  for (const it of visibleItems()) {
+    const d = document.createElement("div");
+    d.className = "item" + (it.stem === S.cur?.stem ? " current" : "");
+    const kind = it.kind === "dataset" ? `<span class="badge b-dataset">dataset</span>` : "";
+    const sc = it.score != null ? ` · unc ${it.score.toFixed(3)}` : "";
+    d.innerHTML = `<div class="name" title="${it.stem}">${it.stem}</div>
+      <div class="info"><span class="badge b-${it.status}">${it.status}</span>${kind}${it.split}${sc}</div>`;
+    d.onclick = () => openItem(it.stem);
+    list.appendChild(d);
+  }
+  const q = S.items.filter((i) => i.kind === "queue");
+  $("#sProgress").textContent = `queue: ${q.filter((i) => i.status === "done").length}/${q.length} done, ${q.filter((i) => i.status === "skipped").length} skipped · round ${S.meta.round}`;
+}
+
+// ---------------------------------------------------------------- loading
+async function openItem(stem) {
+  if (S.dirty && !confirm("Discard unsaved changes?")) return;
+  const it = S.items.find((i) => i.stem === stem); if (!it) return;
+  S.cur = it;
+  $("#split").value = it.split || "train";
+  const enc = encodeURIComponent(stem);
+  const [img] = await Promise.all([loadImage(`/api/image?stem=${enc}`), loadMask(stem, "auto")]);
+  S.img = img;
+  S.conf = null; S.confCanvas = null;
+  if (it.kind === "queue") {
+    try { buildConf(await loadImage(`/api/conf?stem=${enc}`)); } catch (e) { /* no conf map */ }
+  }
+  S.undo = []; S.redo = []; setDirty(false);
+  fit(); renderList();
+  $("#sImage").textContent = `${stem}  (${S.W}×${S.H})`;
+  document.querySelector(".item.current")?.scrollIntoView({ block: "nearest" });
+}
+function loadImage(url) {
+  return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+}
+async function loadMask(stem, prefer) {
+  const r = await fetch(`/api/mask?stem=${encodeURIComponent(stem)}&prefer=${prefer}`);
+  if (!r.ok) throw new Error(await r.text());
+  S.W = +r.headers.get("X-Width"); S.H = +r.headers.get("X-Height");
+  S.origin = r.headers.get("X-Mask-Origin");
+  S.mask = new Uint8Array(await r.arrayBuffer());
+  if (S.mask.length !== S.W * S.H) throw new Error("mask size mismatch");
+  S.overlay.width = S.W; S.overlay.height = S.H;
+  S.ovData = S.overlay.getContext("2d").createImageData(S.W, S.H);
+  refreshOverlay(0, 0, S.W, S.H);
+  $("#sOrigin").textContent = `mask from: ${S.origin}`;
+}
+function buildConf(im) {
+  const c = document.createElement("canvas"); c.width = im.width; c.height = im.height;
+  const cx = c.getContext("2d"); cx.drawImage(im, 0, 0);
+  const d = cx.getImageData(0, 0, c.width, c.height);
+  S.conf = new Uint8Array(c.width * c.height);
+  for (let i = 0; i < S.conf.length; i++) {
+    const v = d.data[i * 4]; S.conf[i] = v;
+    const u = Math.max(0, 1 - v / 255);           // uncertainty
+    d.data[i * 4] = 255; d.data[i * 4 + 1] = 40; d.data[i * 4 + 2] = 40;
+    d.data[i * 4 + 3] = Math.min(255, Math.round(u * u * 4 * 255)); // emphasise low confidence
+  }
+  cx.putImageData(d, 0, 0); S.confCanvas = c;
+}
+
+// ---------------------------------------------------------------- rendering
+function refreshOverlay(x0, y0, x1, y1) {
+  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+  x1 = Math.min(S.W, Math.ceil(x1)); y1 = Math.min(S.H, Math.ceil(y1));
+  if (x1 <= x0 || y1 <= y0) return;
+  const d = S.ovData.data, m = S.mask, W = S.W;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const i = y * W + x, c = S.colors[m[i]], j = i * 4;
+    if (c) { d[j] = c[0]; d[j + 1] = c[1]; d[j + 2] = c[2]; d[j + 3] = 255; } else d[j + 3] = 0;
+  }
+  S.overlay.getContext("2d").putImageData(S.ovData, 0, 0, x0, y0, x1 - x0, y1 - y0);
+}
+let drawPending = false;
+function draw() {
+  if (drawPending) return; drawPending = true;
+  requestAnimationFrame(() => { drawPending = false; drawNow(); });
+}
+function drawNow() {
+  const dpr = window.devicePixelRatio || 1;
+  vctx.setTransform(1, 0, 0, 1, 0, 0);
+  vctx.fillStyle = "#111"; vctx.fillRect(0, 0, view.width, view.height);
+  if (!S.img) return;
+  vctx.setTransform(S.scale * dpr, 0, 0, S.scale * dpr, S.ox * dpr, S.oy * dpr);
+  vctx.imageSmoothingEnabled = S.scale < 2;
+  vctx.globalAlpha = 1; vctx.drawImage(S.img, 0, 0);
+  if (S.showMask) { vctx.imageSmoothingEnabled = false; vctx.globalAlpha = S.alpha; vctx.drawImage(S.overlay, 0, 0); }
+  if (S.showConf && S.confCanvas) { vctx.globalAlpha = 0.8; vctx.drawImage(S.confCanvas, 0, 0); }
+  vctx.globalAlpha = 1;
+  // tool previews in screen space
+  vctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const col = S.cls === IGN ? "rgb(255,0,255)" : (S.colors[S.cls] ? `rgb(${S.colors[S.cls]})` : "#ddd");
+  vctx.strokeStyle = col; vctx.lineWidth = 1.5;
+  if (S.tool === "lasso" && S.path.length) {
+    vctx.beginPath(); S.path.forEach(([x, y], k) => { const [sx, sy] = toScreen(x, y); k ? vctx.lineTo(sx, sy) : vctx.moveTo(sx, sy); });
+    vctx.closePath(); vctx.stroke();
+  }
+  if ((S.tool === "below" || S.tool === "above") && S.poly.length) {
+    const pts = [...S.poly]; if (S.mouse) pts.push(S.mouse);
+    vctx.beginPath(); pts.forEach(([x, y], k) => { const [sx, sy] = toScreen(x, y); k ? vctx.lineTo(sx, sy) : vctx.moveTo(sx, sy); });
+    vctx.stroke();
+    for (const [x, y] of S.poly) { const [sx, sy] = toScreen(x, y); vctx.fillStyle = col; vctx.fillRect(sx - 3, sy - 3, 6, 6); }
+  }
+  if (S.tool === "brush" && S.mouse) {
+    const [sx, sy] = toScreen(S.mouse[0], S.mouse[1]);
+    vctx.beginPath(); vctx.arc(sx, sy, Math.max(1, S.brush * S.scale), 0, Math.PI * 2); vctx.stroke();
+  }
+}
+function resize() {
+  const dpr = window.devicePixelRatio || 1, r = stage.getBoundingClientRect();
+  view.width = r.width * dpr; view.height = r.height * dpr;
+  view.style.width = r.width + "px"; view.style.height = r.height + "px";
+  draw();
+}
+function fit() {
+  const r = stage.getBoundingClientRect();
+  S.scale = Math.min(r.width / S.W, r.height / S.H) * 0.98;
+  S.ox = (r.width - S.W * S.scale) / 2; S.oy = (r.height - S.H * S.scale) / 2;
+  draw();
+}
+const toScreen = (x, y) => [x * S.scale + S.ox, y * S.scale + S.oy];
+const toImage = (sx, sy) => [(sx - S.ox) / S.scale, (sy - S.oy) / S.scale];
+
+// ---------------------------------------------------------------- editing
+function pushUndo() {
+  S.undo.push(S.mask.slice()); if (S.undo.length > MAX_UNDO) S.undo.shift();
+  S.redo = []; setDirty(true);
+}
+function undo() {
+  if (!S.undo.length) return; S.redo.push(S.mask); S.mask = S.undo.pop();
+  refreshOverlay(0, 0, S.W, S.H); setDirty(true); draw();
+}
+function redo() {
+  if (!S.redo.length) return; S.undo.push(S.mask); S.mask = S.redo.pop();
+  refreshOverlay(0, 0, S.W, S.H); setDirty(true); draw();
+}
+function canPaint(i) { return S.target < 0 || S.mask[i] === S.target; }
+
+function stamp(cx, cy) {
+  const r = S.brush, r2 = r * r, W = S.W, H = S.H, m = S.mask, c = S.cls;
+  const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(W - 1, Math.ceil(cx + r));
+  const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(H - 1, Math.ceil(cy + r));
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+    if (dx * dx + dy * dy <= r2) { const i = y * W + x; if (canPaint(i)) m[i] = c; }
+  }
+  refreshOverlay(x0, y0, x1 + 1, y1 + 1);
+}
+function strokeTo(a, b) {
+  const dist = Math.hypot(b[0] - a[0], b[1] - a[1]), step = Math.max(0.5, S.brush / 3);
+  const n = Math.max(1, Math.ceil(dist / step));
+  for (let k = 1; k <= n; k++) stamp(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n);
+}
+function fillPolygon(pts) {
+  if (pts.length < 3) return;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [x, y] of pts) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); }
+  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+  x1 = Math.min(S.W, Math.ceil(x1)); y1 = Math.min(S.H, Math.ceil(y1));
+  const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) return;
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  const cx = c.getContext("2d"); cx.fillStyle = "#fff"; cx.beginPath();
+  pts.forEach(([x, y], k) => (k ? cx.lineTo(x - x0, y - y0) : cx.moveTo(x - x0, y - y0)));
+  cx.closePath(); cx.fill();
+  const a = cx.getImageData(0, 0, w, h).data;
+  let any = false; for (let k = 3; k < a.length; k += 4) if (a[k] >= 128) { any = true; break; }
+  if (!any) return draw();
+  pushUndo();
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    if (a[(y * w + x) * 4 + 3] >= 128) { const i = (y + y0) * S.W + x + x0; if (canPaint(i)) S.mask[i] = S.cls; }
+  }
+  refreshOverlay(x0, y0, x1, y1); draw();
+}
+function applyPolyline() {
+  if (S.poly.length < 1) return;
+  const pts = [...S.poly].sort((a, b) => a[0] - b[0]);
+  const edge = S.tool === "below" ? S.H : 0;
+  const poly = [[0, edge], [0, pts[0][1]], ...pts, [S.W, pts[pts.length - 1][1]], [S.W, edge]];
+  S.poly = []; fillPolygon(poly);
+}
+function bucket(px, py) {
+  const W = S.W, H = S.H, m = S.mask, start = py * W + px, from = m[start], to = S.cls;
+  if (from === to || !canPaint(start)) return;
+  pushUndo();
+  const stack = new Int32Array(W * H); let sp = 0; stack[sp++] = start; m[start] = to;
+  let x0 = px, x1 = px, y0 = py, y1 = py;
+  while (sp) {
+    const i = stack[--sp], x = i % W, y = (i - x) / W;
+    if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+    if (x > 0 && m[i - 1] === from) { m[i - 1] = to; stack[sp++] = i - 1; }
+    if (x < W - 1 && m[i + 1] === from) { m[i + 1] = to; stack[sp++] = i + 1; }
+    if (y > 0 && m[i - W] === from) { m[i - W] = to; stack[sp++] = i - W; }
+    if (y < H - 1 && m[i + W] === from) { m[i + W] = to; stack[sp++] = i + W; }
+  }
+  refreshOverlay(x0, y0, x1 + 1, y1 + 1); draw();
+}
+
+// ---------------------------------------------------------------- input
+function setupMouse() {
+  view.addEventListener("contextmenu", (e) => e.preventDefault());
+  view.addEventListener("mousedown", (e) => {
+    if (!S.img) return;
+    const r = view.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+    const p = toImage(sx, sy);
+    if (e.button === 1 || e.button === 2 || S.space) { S.drag = { mode: "pan", sx, sy, ox: S.ox, oy: S.oy }; return; }
+    if (e.button !== 0) return;
+    if (S.tool === "brush") { pushUndo(); S.drag = { mode: "brush", last: p }; stamp(p[0], p[1]); draw(); }
+    else if (S.tool === "lasso") { S.drag = { mode: "lasso" }; S.path = [p]; }
+    else if (S.tool === "below" || S.tool === "above") { S.poly.push(p); draw(); }
+    else if (S.tool === "fill") {
+      const x = Math.floor(p[0]), y = Math.floor(p[1]);
+      if (x >= 0 && y >= 0 && x < S.W && y < S.H) bucket(x, y);
+    }
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!S.img) return;
+    const r = view.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+    const p = toImage(sx, sy); S.mouse = p;
+    const d = S.drag;
+    if (d?.mode === "pan") { S.ox = d.ox + sx - d.sx; S.oy = d.oy + sy - d.sy; }
+    else if (d?.mode === "brush") { strokeTo(d.last, p); d.last = p; }
+    else if (d?.mode === "lasso") { S.path.push(p); }
+    updateCursorInfo(p); draw();
+  });
+  window.addEventListener("mouseup", () => {
+    const d = S.drag; S.drag = null;
+    if (d?.mode === "lasso") { const pts = S.path; S.path = []; if (pts.length >= 3) fillPolygon(pts); else draw(); }
+  });
+  view.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const r = view.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+    const [ix, iy] = toImage(sx, sy);
+    const f = Math.exp(-e.deltaY * 0.0015);
+    S.scale = Math.min(40, Math.max(0.05, S.scale * f));
+    S.ox = sx - ix * S.scale; S.oy = sy - iy * S.scale; draw();
+  }, { passive: false });
+}
+function updateCursorInfo([x, y]) {
+  x = Math.floor(x); y = Math.floor(y);
+  if (x < 0 || y < 0 || x >= S.W || y >= S.H) { $("#sCursor").textContent = ""; return; }
+  const i = y * S.W + x, c = S.mask[i];
+  const name = c === IGN ? "ignore" : (S.meta.classes.find((k) => k.id === c)?.name ?? c);
+  const conf = S.conf && S.conf.length === S.W * S.H ? ` · conf ${(S.conf[i] / 255).toFixed(2)}` : "";
+  $("#sCursor").textContent = `x ${x}, y ${y} · ${name}${conf}`;
+}
+function setupKeys() {
+  window.addEventListener("keydown", (e) => {
+    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    const k = e.key;
+    if (k === " ") { S.space = true; e.preventDefault(); return; }
+    if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+    if ((e.ctrlKey || e.metaKey) && k.toLowerCase() === "y") { e.preventDefault(); redo(); return; }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const all = [...S.meta.classes.map((c) => c.id)];
+    if (/^[1-9]$/.test(k) && +k <= all.length) return setClass(all[+k - 1]);
+    switch (k) {
+      case "0": return setClass(IGN);
+      case "b": return setTool("brush");
+      case "l": return setTool("lasso");
+      case "d": return setTool("below");
+      case "u": return setTool("above");
+      case "g": return setTool("fill");
+      case "[": return setBrush(Math.max(1, Math.round(S.brush / 1.25)));
+      case "]": return setBrush(Math.min(150, Math.round(S.brush * 1.25 + 1)));
+      case "m": return toggleMask();
+      case "c": return toggleConf();
+      case "f": return fit();
+      case "s": case "S": return save(e.shiftKey);
+      case "n": return step(1);
+      case "p": return step(-1);
+      case "x": return skip();
+      case "r": return resetToPrediction();
+      case "Enter": return applyPolyline();
+      case "Escape": S.poly = []; S.path = []; return draw();
+      case "Backspace": S.poly.pop(); e.preventDefault(); return draw();
+      case "?": case "h": return $("#helpBtn").click();
+    }
+  });
+  window.addEventListener("keyup", (e) => { if (e.key === " ") S.space = false; });
+  window.addEventListener("beforeunload", (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ""; } });
+}
+
+// ---------------------------------------------------------------- UI state
+function setTool(t) {
+  S.tool = t; S.poly = []; S.path = [];
+  document.querySelectorAll("#tools button").forEach((b) => b.classList.toggle("active", b.dataset.tool === t));
+  draw();
+}
+function setClass(c) {
+  S.cls = c;
+  document.querySelectorAll("#classes button").forEach((b) => b.classList.toggle("active", +b.dataset.cls === c));
+  draw();
+}
+function setBrush(v) { S.brush = v; $("#brush").value = v; $("#brushVal").textContent = v; draw(); }
+function toggleMask() { S.showMask = !S.showMask; $("#toggleMask").classList.toggle("active", S.showMask); draw(); }
+function toggleConf() {
+  if (!S.confCanvas) return toast("No confidence map for this image");
+  S.showConf = !S.showConf; $("#toggleConf").classList.toggle("active", S.showConf); draw();
+}
+function setDirty(v) { S.dirty = v; $("#dirty").textContent = v ? "● unsaved" : ""; }
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.style.opacity = 1; clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.opacity = 0), 1800); }
+
+async function resetToPrediction() {
+  if (!S.cur) return;
+  const old = S.mask;
+  try { await loadMask(S.cur.stem, "prediction"); } catch (e) { return toast("No prediction available"); }
+  S.undo.push(old); S.redo = []; setDirty(true); draw();
+}
+function step(d) {
+  const vis = visibleItems(); if (!vis.length) return;
+  let i = vis.findIndex((it) => it.stem === S.cur?.stem);
+  i = i < 0 ? 0 : Math.min(vis.length - 1, Math.max(0, i + d));
+  openItem(vis[i].stem);
+}
+async function gzip(bytes) {
+  if (!window.CompressionStream) return bytes;
+  const cs = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+  return new Uint8Array(await new Response(cs).arrayBuffer());
+}
+async function save(next) {
+  if (!S.cur) return;
+  const split = $("#split").value, stem = S.cur.stem;
+  const body = await gzip(S.mask);
+  const r = await fetch(`/api/mask?stem=${encodeURIComponent(stem)}&w=${S.W}&h=${S.H}&split=${split}`, { method: "POST", body });
+  const j = await r.json();
+  if (!r.ok) return toast("Save failed: " + j.error);
+  setDirty(false); toast(`Saved (${split})`);
+  const nextStem = next ? neighbour() : null;
+  await loadItems();
+  S.cur = S.items.find((i) => i.stem === stem) || S.cur; renderList();
+  if (nextStem) openItem(nextStem);
+}
+function neighbour() {
+  // Next item in the current list view after the current one (computed before the list refreshes).
+  const vis = visibleItems(), i = vis.findIndex((it) => it.stem === S.cur?.stem);
+  return vis[i + 1]?.stem ?? (vis[i - 1]?.stem !== S.cur?.stem ? vis[i - 1]?.stem : null);
+}
+async function skip() {
+  if (!S.cur || S.cur.kind !== "queue") return toast("Only queue images can be skipped");
+  const nextStem = neighbour();
+  const r = await fetch(`/api/status?stem=${encodeURIComponent(S.cur.stem)}&status=skipped`, { method: "POST" });
+  if (!r.ok) return toast("Skip failed");
+  setDirty(false); await loadItems();
+  if (nextStem) openItem(nextStem); else toast("Skipped");
+}
+
+init().catch((e) => { console.error(e); toast("Error: " + e.message); });
+</script>
+</body>
+</html>
