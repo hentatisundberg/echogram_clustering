@@ -50,6 +50,13 @@ QUEUE_FIELDS = [
 ]
 
 _queue_lock = threading.Lock()
+_log_lock = threading.Lock()
+
+
+def now_iso() -> str:
+    from datetime import datetime
+
+    return datetime.now().isoformat(timespec="seconds")
 
 
 # ----------------------------------------------------------------------------
@@ -214,6 +221,31 @@ class Workspace:
                 if row["stem"] == stem:
                     row.update({k: str(v) for k, v in changes.items()})
             self.write_queue(rows)
+
+    # --- activity log ----------------------------------------------------------
+    @property
+    def log_path(self) -> Path:
+        return self.root / "log.jsonl"
+
+    def log(self, event: str, **details) -> None:
+        """Append one event to log.jsonl (never raises: logging must not break the loop)."""
+        rec = {"time": now_iso(), "event": event, **details}
+        try:
+            with _log_lock, self.log_path.open("a") as f:
+                f.write(json.dumps(rec, default=str) + "\n")
+        except OSError as e:
+            print(f"Warning: could not write activity log: {e}")
+
+    def read_log(self) -> list[dict]:
+        if not self.log_path.exists():
+            return []
+        out = []
+        for line in self.log_path.read_text().splitlines():
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        return out
 
 
 def init_workspace(
@@ -583,6 +615,15 @@ def select_images(
 
     with _queue_lock:
         ws.write_queue(ws.read_queue() + new_rows)
+    ws.log(
+        "select",
+        round=rnd,
+        model=str(rel_to_project(model_path)),
+        strategy=strategy,
+        n_scored=len(scored),
+        n_queued=len(new_rows),
+        pool_remaining=len(pool) - len(new_rows) if not sample else None,
+    )
 
     # Save all scores so you can inspect the distribution later.
     scores_csv = ws.queue_dir / f"scores_round{rnd:02d}.csv"
@@ -619,6 +660,7 @@ def refresh_predictions(ws: Workspace, model_path: Path, device: str = "auto") -
         )
     with _queue_lock:
         ws.write_queue(rows)
+    ws.log("repredict", model=str(rel_to_project(model_path)), n=len(todo))
     return len(todo)
 
 
@@ -660,6 +702,16 @@ def train_round(
     print(f"Training {name}: {n_train} train / {n_val} val images, init={weights}")
 
     ws.write_data_yaml()
+    # Remember exactly which labels this round sees, so `status` can tell
+    # which annotations are newer than the current model.
+    run_dir = ws.runs_dir / name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    started = now_iso()
+    atomic_write_text(
+        run_dir / "labels.json",
+        json.dumps({"round": rnd, "started": started, "init": str(weights), "labels": labeled}, indent=1),
+    )
+    ws.log("train_started", round=rnd, n_train=n_train, n_val=n_val, init=str(weights), epochs=epochs)
     model = YOLO(str(weights))
     model.train(
         data=str(ws.data_yaml),
@@ -692,6 +744,7 @@ def train_round(
     ws.config["round"] = rnd
     ws.config["current_model"] = str(rel_to_project(best))
     ws.save_config()
+    ws.log("train_finished", round=rnd, best_mIoU=miou, weights=str(rel_to_project(best)))
     return best
 
 

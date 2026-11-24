@@ -123,8 +123,10 @@ class Annotator:
         if bad:
             raise ValueError(f"Invalid class ids in mask: {sorted(bad)}")
         self.ws.save_label(stem, img, mask, split)
-        if self._queue_row(stem) is not None:
+        in_queue = self._queue_row(stem) is not None
+        if in_queue:
             self.ws.update_queue_item(stem, status="done", split=split)
+        self.ws.log("annotated", stem=stem, split=split, kind="queue" if in_queue else "dataset")
 
     def set_status(self, stem: str, status: str) -> None:
         if status not in ("todo", "skipped"):
@@ -132,6 +134,7 @@ class Annotator:
         if self._queue_row(stem) is None:
             raise KeyError(stem)
         self.ws.update_queue_item(stem, status=status)
+        self.ws.log("status_changed", stem=stem, status=status)
 
 
 def make_handler(annotator: Annotator):

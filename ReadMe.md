@@ -42,9 +42,26 @@ ssh -N -L 8765:localhost:8765 user@remote
 # 4. Fine-tune the current model on everything labelled so far
 python code/al.py train --epochs 60 --device 0,1 --repredict
 
-# 5. Repeat from step 2.  Check progress with:
-python code/al.py status
+# 5. Repeat from step 2.
 ```
+
+## Where am I? (`status`)
+
+Annotations are saved straight into `data/al/dataset/masks/` when you press save in the annotator.
+Training uses all of them, so nothing gets lost if you stop halfway. Run this at any time:
+
+```bash
+python code/al.py status           # progress per phase + recommended next command
+python code/al.py status -v        # also list which labels the current model has not seen
+python code/al.py status --no-pool # skip scanning the (large) pool directory
+python code/al.py log              # full activity log (data/al/log.jsonl)
+python code/al.py pool --add data/new_images   # phase 1: add new candidate images
+```
+
+`status` covers the five phases: **1 pool** (unlabelled candidates left), **2 select** (queued this
+round), **3 pre-annotate** (are the queued predictions from the current model?), **4 annotate**
+(done / to go), and **5 retrain** (new or edited labels the current model has not been trained on).
+It also flags a training run that was started but never finished.
 
 Annotation tips: "Fill below" (`D`) fills everything under a polyline you click (good for seafloor), and
 "Fill above" (`U`) does the same upwards (good for surface turbidity). "Only paint over" protects other classes while you paint.

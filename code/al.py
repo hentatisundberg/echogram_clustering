@@ -6,7 +6,9 @@
     serve      start the browser annotator (use through an SSH tunnel)
     train      fine-tune on everything labelled so far -> new current model
     repredict  refresh predictions of not-yet-annotated queue images with the current model
-    status     print a summary
+    status     where am I in the loop, and what should I do next?
+    log        print the full activity log
+    pool       list / add directories of candidate (unlabelled) images
 
 Typical cycle (on the remote, inside tmux):
 
@@ -30,6 +32,7 @@ from al_core import (  # noqa: E402
     Workspace,
     import_roboflow,
     init_workspace,
+    now_iso,
     refresh_predictions,
     resolve_path,
     select_images,
@@ -70,9 +73,14 @@ def cmd_init(args):
     )
     print(f"Workspace: {ws.root}")
     print("Classes:", ws.classes)
+    n = 0
     if args.roboflow:
         n = import_roboflow(ws, args.roboflow)
         print(f"Imported {n} labelled images from {args.roboflow}")
+        # Masks changed after this moment are your edits (used by `status`).
+        ws.config["labels_baseline"] = now_iso()
+        ws.save_config()
+    ws.log("init", model=ws.config.get("current_model"), pool=ws.config["pool"], imported=n)
     cmd_status(args)
 
 
@@ -120,24 +128,44 @@ def cmd_train(args):
 
 
 def cmd_status(args):
+    from al_status import build_report, format_report
+
     ws = Workspace.load(args.workspace)
-    labeled = ws.labeled_stems()
-    queue = ws.read_queue()
-    by_status = {}
-    for r in queue:
-        by_status[r["status"]] = by_status.get(r["status"], 0) + 1
-    print("-" * 50)
-    print(f"Workspace:     {ws.root}")
-    print(f"Round:         {ws.config.get('round', 0)}")
-    print(f"Current model: {ws.config.get('current_model')}")
-    print(f"Pool:          {', '.join(ws.config['pool'])}")
-    print(f"Labelled:      {sum(s == 'train' for s in labeled.values())} train, "
-          f"{sum(s == 'val' for s in labeled.values())} val")
-    print(f"Queue:         {by_status or 'empty'}")
-    if ws.history_csv.exists():
-        print("History:")
-        print("  " + ws.history_csv.read_text().strip().replace("\n", "\n  "))
-    print("-" * 50)
+    report = build_report(ws, scan_pool=not getattr(args, "no_pool", False))
+    print(format_report(ws, report, recent=getattr(args, "recent", 8)))
+    if getattr(args, "verbose", False):
+        print("New labels not yet used by the current model:", ", ".join(report.new_labels) or "-")
+        print("Edited labels not yet used by the current model:", ", ".join(report.edited_labels) or "-")
+
+
+def cmd_log(args):
+    from al_status import describe_event
+
+    ws = Workspace.load(args.workspace)
+    events = ws.read_log()
+    if not events:
+        print(f"No activity logged yet ({ws.log_path}).")
+    for e in events[-args.n:] if args.n else events:
+        print(f"{e.get('time', '?').replace('T', ' ')}  {describe_event(e)}")
+
+
+def cmd_pool(args):
+    from al_core import find_images, rel_to_project
+
+    ws = Workspace.load(args.workspace)
+    if args.add:
+        for d in args.add:
+            path = resolve_path(d)
+            if not path.exists():
+                raise SystemExit(f"Not found: {path}")
+            rel = str(rel_to_project(path))
+            if rel not in ws.config["pool"]:
+                ws.config["pool"].append(rel)
+                ws.log("pool_add", dir=rel)
+                print(f"Added {rel}")
+        ws.save_config()
+    for d in ws.config["pool"]:
+        print(f"  {d:<40} {len(find_images([Path(d)]))} images")
 
 
 def main():
@@ -188,8 +216,19 @@ def main():
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_repredict)
 
-    s = sub.add_parser("status", help="Show workspace summary")
+    s = sub.add_parser("status", help="Show progress per phase and advise the next step")
+    s.add_argument("--no-pool", action="store_true", help="Skip scanning the pool dirs (faster)")
+    s.add_argument("--recent", type=int, default=8, help="Number of recent activity lines")
+    s.add_argument("--verbose", "-v", action="store_true", help="List the new/edited label names")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("log", help="Print the activity log")
+    s.add_argument("--n", type=int, default=None, help="Only the last N events")
+    s.set_defaults(func=cmd_log)
+
+    s = sub.add_parser("pool", help="List pool dirs, or add new ones with --add")
+    s.add_argument("--add", nargs="+", help="Directories of new candidate images")
+    s.set_defaults(func=cmd_pool)
 
     args = p.parse_args()
     args.func(args)
