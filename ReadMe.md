@@ -36,7 +36,7 @@ python code/al.py select --n 20
 # 3. Annotate. Remote:
 python code/al.py serve
 #    Laptop (separate terminal):
-ssh -N -L 8765:localhost:8765 user@remote
+ssh -N -L 8765:localhost:8765 jonas@77.235.243.22
 #    then open http://localhost:8765   (press ? in the page for shortcuts)
 
 # 4. Fine-tune the current model on everything labelled so far

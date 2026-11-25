@@ -529,17 +529,24 @@ def select_images(
     device: str = "auto",
     seed: int = 0,
     random_fraction: float = 0.25,
+    pool_dirs: list[Path] | None = None,
 ) -> list[dict]:
-    """Score unlabelled pool images and add the N most informative to the queue."""
+    """Score unlabelled pool images and add the N most informative to the queue.
+
+    pool_dirs: folders (or image files) to draw from; defaults to the workspace pool.
+    """
     rng = random.Random(seed)
     labeled = set(ws.labeled_stems())
     queue = ws.read_queue()
     queued_sources = {resolve_path(r["source"]).resolve() for r in queue}
     queued_stems = {r["stem"] for r in queue}
 
+    if pool_dirs is None:
+        pool_dirs = [Path(d) for d in ws.config["pool"]]
+    print("Pool: " + ", ".join(str(rel_to_project(d)) for d in pool_dirs))
     pool = [
         p
-        for p in find_images([Path(d) for d in ws.config["pool"]])
+        for p in find_images(pool_dirs)
         if p.resolve() not in queued_sources and p.stem not in labeled
     ]
     print(f"Unlabelled pool images: {len(pool)}")
@@ -620,6 +627,7 @@ def select_images(
         round=rnd,
         model=str(rel_to_project(model_path)),
         strategy=strategy,
+        pool=[str(rel_to_project(d)) for d in pool_dirs],
         n_scored=len(scored),
         n_queued=len(new_rows),
         pool_remaining=len(pool) - len(new_rows) if not sample else None,

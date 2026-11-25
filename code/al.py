@@ -89,8 +89,19 @@ def cmd_select(args):
     model = resolve_path(args.model) if args.model else ws.current_model
     if model is None or not model.exists():
         raise SystemExit(f"Model not found: {model}. Pass --model or train first.")
+    pool_dirs = None
+    if args.pool:
+        pool_dirs = []
+        for d in args.pool:
+            # Accept paths relative to the current dir or to the project root.
+            path = Path(d).expanduser()
+            path = path.resolve() if path.exists() else resolve_path(d)
+            if not path.exists():
+                raise SystemExit(f"Pool folder not found: {d}")
+            pool_dirs.append(path)
     rows = select_images(
-        ws, model, args.n, args.strategy, args.sample, args.device, args.seed, args.random_fraction
+        ws, model, args.n, args.strategy, args.sample, args.device, args.seed, args.random_fraction,
+        pool_dirs=pool_dirs,
     )
     print(f"\nQueued {len(rows)} images for annotation:")
     for r in rows:
@@ -187,6 +198,9 @@ def main():
                    help="mixed = mostly most-uncertain + some random (default)")
     s.add_argument("--random-fraction", type=float, default=0.25, help="Random share for --strategy mixed")
     s.add_argument("--sample", type=int, default=None, help="Only score a random subset of the pool")
+    s.add_argument("--pool", nargs="+", metavar="DIR",
+                   help="Folder(s) to select from this time, instead of the workspace pool "
+                        "(see `al.py pool`). Subfolders are searched too.")
     s.add_argument("--model", help="Override the workspace's current model")
     s.add_argument("--device", default="auto")
     s.add_argument("--seed", type=int, default=0)
