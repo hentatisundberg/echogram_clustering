@@ -1,7 +1,7 @@
 """Status report and "what next?" advice for the active-learning loop.
 
 Everything is derived from files in the workspace (masks, queue.csv, config.json,
-runs/round_XX/labels.json, log.jsonl), so the report is correct even for work done
+manifests/round_XX.json, log.jsonl), so the report is correct even for work done
 before the activity log existed.
 
 The loop has five phases:
@@ -86,17 +86,25 @@ def _import_baseline(mtimes: list[float], gap: float = 600.0) -> float | None:
     return end + 1.0
 
 
-def _manifest_for(ws: Workspace, model: Path | None) -> dict | None:
-    """labels.json written by train_round next to runs/round_XX/weights/best.pt."""
-    if model is None:
-        return None
-    path = model.parent.parent / "labels.json"
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except json.JSONDecodeError:
-            return None
+def _manifest_for(ws: Workspace, rnd: int, model: Path | None) -> dict | None:
+    """Label list written by train_round when round `rnd` started (manifests/round_XX.json;
+    older code wrote runs/round_XX/labels.json, which ultralytics could delete)."""
+    candidates = [ws.manifest_path(rnd)] if rnd > 0 else []
+    if model is not None:
+        candidates.append(model.parent.parent / "labels.json")
+    for path in candidates:
+        if path.exists():
+            try:
+                return json.loads(path.read_text())
+            except json.JSONDecodeError:
+                continue
     return None
+
+
+def _train_started(ws: Workspace, rnd: int) -> dict | None:
+    """Last 'train_started' log event for round `rnd`."""
+    hits = [e for e in ws.read_log() if e.get("event") == "train_started" and str(e.get("round")) == str(rnd)]
+    return hits[-1] if hits else None
 
 
 def build_report(ws: Workspace, scan_pool: bool = True) -> Report:
@@ -116,8 +124,22 @@ def build_report(ws: Workspace, scan_pool: bool = True) -> Report:
     queue_stems = {q["stem"] for q in queue}
 
     # --- which labels has the current model seen? -----------------------------
-    manifest = _manifest_for(ws, model)
-    if manifest is not None:
+    manifest = _manifest_for(ws, r.round, model)
+    started_ev = _train_started(ws, r.round) if manifest is None and r.round > 0 else None
+    if manifest is None and started_ev is not None:
+        # Round trained by this loop, but its label list is missing: the model saw
+        # every mask that existed when training started (new and edited masks after
+        # that can't be told apart, so they are all reported as new).
+        started = (_parse_time(started_ev.get("time")) or 0.0) + 1.0
+        seen = {s for s in labeled if mask_time[s] <= started}
+        r.new_labels = sorted(set(labeled) - seen)
+        r.edits_approx = True
+        n_tr = sum(labeled[s] == "train" for s in seen)
+        r.model_basis = (
+            f"round {r.round}: {n_tr} train / {len(seen) - n_tr} val labels "
+            "(label list reconstructed from file times)"
+        )
+    elif manifest is not None:
         seen = set(manifest.get("labels", {}))
         started = (_parse_time(manifest.get("started")) or 0.0) + 1.0  # ISO time has 1 s resolution
         r.new_labels = sorted(set(labeled) - seen)
@@ -161,15 +183,16 @@ def build_report(ws: Workspace, scan_pool: bool = True) -> Report:
     # --- a training round that never finished (or is running now) --------------
     nxt = r.round + 1
     run_dir = ws.runs_dir / f"round_{nxt:02d}"
-    if run_dir.exists():
+    pending_manifest = _manifest_for(ws, nxt, None)
+    if run_dir.exists() or pending_manifest is not None:
         info = {"round": nxt, "dir": str(rel_to_project(run_dir)), "epochs_done": 0}
         res = run_dir / "results.csv"
         if res.exists():
             info["epochs_done"] = max(0, len(res.read_text().strip().splitlines()) - 1)
             info["last_update"] = _mtime(res)
-        lj = run_dir / "labels.json"
-        if lj.exists():
-            info["started"] = _parse_time(json.loads(lj.read_text()).get("started"))
+        if pending_manifest is not None:
+            info["started"] = _parse_time(pending_manifest.get("started"))
+            info.setdefault("last_update", _mtime(ws.manifest_path(nxt)))
         r.pending_train = info
 
     r.events = ws.read_log()

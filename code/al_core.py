@@ -98,6 +98,11 @@ class Workspace:
     def history_csv(self) -> Path:
         return self.root / "history.csv"
 
+    def manifest_path(self, rnd: int) -> Path:
+        """Which labels round `rnd` trained on. Kept outside runs/round_XX because
+        ultralytics may clear that directory when training starts."""
+        return self.root / "manifests" / f"round_{rnd:02d}.json"
+
     def image_dir(self, split: str) -> Path:
         return self.dataset_dir / "images" / split
 
@@ -712,11 +717,11 @@ def train_round(
     ws.write_data_yaml()
     # Remember exactly which labels this round sees, so `status` can tell
     # which annotations are newer than the current model.
-    run_dir = ws.runs_dir / name
-    run_dir.mkdir(parents=True, exist_ok=True)
     started = now_iso()
+    manifest = ws.manifest_path(rnd)
+    manifest.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
-        run_dir / "labels.json",
+        manifest,
         json.dumps({"round": rnd, "started": started, "init": str(weights), "labels": labeled}, indent=1),
     )
     ws.log("train_started", round=rnd, n_train=n_train, n_val=n_val, init=str(weights), epochs=epochs)
